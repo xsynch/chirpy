@@ -75,9 +75,9 @@ server := &http.Server{
 fs := http.FileServer(http.Dir(rootDir))
 mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app",apiConfig.addHeaders(fs))))
 
-mux.HandleFunc("/healthz", handleHealth)
-mux.HandleFunc("/metrics",apiConfig.getMetrics)
-mux.HandleFunc("/reset", apiConfig.reset)
+mux.HandleFunc("GET /api/healthz", handleHealth)
+mux.HandleFunc("GET /api/metrics",apiConfig.getMetrics)
+mux.HandleFunc("POST /api/reset", apiConfig.reset)
 
 
 log.Printf("Server files from %s on port: %d",rootDir, httpPort)
