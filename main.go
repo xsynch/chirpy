@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 type apiConfig struct {
@@ -33,8 +35,10 @@ func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request){
 
 func (cfg *apiConfig)getMetrics(w http.ResponseWriter, r *http.Request){
 	currentHits := cfg.fileserverHits.Load()
+	hitsText := fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>",currentHits)
+	w.Header().Add("Content-Type","text/html")
 	w.WriteHeader(http.StatusOK)
-	_, err := w.Write([]byte(fmt.Sprintf("Hits: %d", currentHits)))
+	_, err := w.Write([]byte(hitsText))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,6 +62,69 @@ func (cfg *apiConfig) addHeaders(next http.Handler) http.Handler{
 	})
 }
 
+func (cfg *apiConfig) validateChirp(w http.ResponseWriter, r *http.Request){
+	type incomingChirp struct {
+		Body string `json:"body"`
+	}
+	type chirpError struct {
+		Error string `json:"error"`
+	}
+
+	type chirpSuccess struct{
+		Valid bool `json:"valid"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	chirps := incomingChirp{}
+	err := decoder.Decode(&chirps)
+	if err != nil {
+		log.Printf("Error decoding chirp: %s", err)
+		ce := chirpError{
+			Error: "Something went wrong",
+		}
+		dst, err := json.Marshal(ce)
+		if err != nil {
+			log.Printf("Error marshalling json: %s", err)
+			w.WriteHeader(500)
+			return 
+		}
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type","application/json")
+		w.Write(dst)
+		
+		return 
+	}
+	if utf8.RuneCountInString(chirps.Body) > 140 {
+		ce := chirpError{
+			Error: "Chirp is too long",
+		}
+		dst, err := json.Marshal(ce)
+		if err != nil {
+			log.Printf("Error marshalling json: %s", err)
+			w.WriteHeader(500)
+			return 
+		}
+		w.WriteHeader(400)
+		w.Header().Set("Content-Type","application/json")
+		w.Write(dst)
+		return 
+	}
+	
+	cs := chirpSuccess{
+		Valid: true,
+	}
+	dst, err := json.Marshal(cs)
+	if err != nil {
+		log.Printf("Error marshalling json: %s",err)
+		w.WriteHeader(500)
+		return 
+	}
+	w.WriteHeader(200)
+	w.Header().Set("Content-Type","application/json")
+	w.Write(dst)	 
+
+}
+
 func main(){
 
 rootDir := "."
@@ -75,9 +142,12 @@ server := &http.Server{
 fs := http.FileServer(http.Dir(rootDir))
 mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app",apiConfig.addHeaders(fs))))
 
+
+mux.HandleFunc("GET /admin/metrics",apiConfig.getMetrics)
+mux.HandleFunc("POST /admin/reset", apiConfig.reset)
+
 mux.HandleFunc("GET /api/healthz", handleHealth)
-mux.HandleFunc("GET /api/metrics",apiConfig.getMetrics)
-mux.HandleFunc("POST /api/reset", apiConfig.reset)
+mux.HandleFunc("POST /api/validate_chirp", apiConfig.validateChirp)
 
 
 log.Printf("Server files from %s on port: %d",rootDir, httpPort)
