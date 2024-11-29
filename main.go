@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"unicode/utf8"
 )
@@ -12,6 +13,18 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 }
+
+type incomingChirp struct {
+	Body string `json:"body"`
+}
+type chirpError struct {
+	Error string `json:"error"`
+}
+
+type chirpSuccess struct{
+	Cleaned_body string `json:"cleaned_body"`
+}
+
 
 func handleHealth(w http.ResponseWriter, r *http.Request){
 	w.Header().Add("Content-Type","text/plain; charset=utf-8")	
@@ -63,16 +76,6 @@ func (cfg *apiConfig) addHeaders(next http.Handler) http.Handler{
 }
 
 func (cfg *apiConfig) validateChirp(w http.ResponseWriter, r *http.Request){
-	type incomingChirp struct {
-		Body string `json:"body"`
-	}
-	type chirpError struct {
-		Error string `json:"error"`
-	}
-
-	type chirpSuccess struct{
-		Valid bool `json:"valid"`
-	}
 
 	decoder := json.NewDecoder(r.Body)
 	chirps := incomingChirp{}
@@ -84,6 +87,7 @@ func (cfg *apiConfig) validateChirp(w http.ResponseWriter, r *http.Request){
 		}
 		dst, err := json.Marshal(ce)
 		if err != nil {
+			respondWithError(w,500,fmt.Sprintf("Error marshalling json: %s",err))
 			log.Printf("Error marshalling json: %s", err)
 			w.WriteHeader(500)
 			return 
@@ -110,8 +114,9 @@ func (cfg *apiConfig) validateChirp(w http.ResponseWriter, r *http.Request){
 		return 
 	}
 	
+
 	cs := chirpSuccess{
-		Valid: true,
+		Cleaned_body: cleanChirp(chirps.Body),
 	}
 	dst, err := json.Marshal(cs)
 	if err != nil {
@@ -122,6 +127,31 @@ func (cfg *apiConfig) validateChirp(w http.ResponseWriter, r *http.Request){
 	w.WriteHeader(200)
 	w.Header().Set("Content-Type","application/json")
 	w.Write(dst)	 
+
+}
+
+func cleanChirp(chirp string) string {
+	var final_string = strings.Split(chirp," ")
+	for idx,val := range final_string {
+		if strings.ToLower(val) == "kerfuffle" || strings.ToLower(val) == "sharbert" || strings.ToLower(val) == "fornax"{
+			final_string[idx] = "****"
+		}
+
+	}
+	return strings.Join(final_string," ")
+
+}
+
+func respondWithError(w http.ResponseWriter, code int, msg string){	
+	w.WriteHeader(code)
+	w.Write([]byte(msg))
+	return 
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}){
+	w.Header().Set("Content-Type","application/json")
+	w.WriteHeader(code)
+	fmt.Println(payload)
 
 }
 
