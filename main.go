@@ -168,11 +168,14 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request){
 	
 	newChirp, err := cfg.db.InsertChirp(r.Context(),params)
 	if err != nil {
-		log.Fatalf("error inserting %v into db: %s", params, err)
+		log.Printf("error inserting %v into db: %s", params, err)
+		return 
 	}
+	// log.Printf("Successfully inserted %v into the db", newChirp)
 	cs := chirpSuccess{
-		// ID: newChirp.ID,
-		ID: tokenUserID,
+		ID: newChirp.ID,
+		
+		// ID: tokenUserID,
 		CreatedAt: newChirp.CreatedAt,
 		UpdatedAt: newChirp.UpdatedAt,
 		Body: cleanChirp(chirps.Body),
@@ -224,9 +227,10 @@ func (cfg *apiConfig) getOneChirp(w http.ResponseWriter, r *http.Request){
 	var chirp chirpSuccess
 	results, err := cfg.db.GetOneChirp(r.Context(), chirpID)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Error getting chirps"))
-		log.Fatalf("There was an error getting chirps: %s",err)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("Error finding chirp"))
+		log.Printf("There was an error getting chirp %v: %s", chirpID,err)
+		return 
 	}
 	
 	chirp = chirpSuccess{
@@ -239,7 +243,8 @@ func (cfg *apiConfig) getOneChirp(w http.ResponseWriter, r *http.Request){
 	dst, err := json.Marshal(chirp)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(fmt.Sprintf("Error getting db data %v: %s", dst, err)))
+		w.Write([]byte(fmt.Sprintf("Error Marshalling data %v: %s", dst, err)))
+		return 
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type","application/json")
@@ -254,7 +259,8 @@ func (cfg *apiConfig) chirpLogin(w http.ResponseWriter, r *http.Request){
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("There was an error logging in."))
-		log.Fatalf("Error decoding the request %v: %s",r.Body,err)
+		log.Printf("Error decoding the request %v: %s",r.Body,err)
+		return 
 	}
 	
 	chirpUser.ExpiresInSeconds = int(time.Second) * 3600
@@ -262,7 +268,8 @@ func (cfg *apiConfig) chirpLogin(w http.ResponseWriter, r *http.Request){
 	// log.Println("The user expiration duration is set to ", chirpUser.ExpiresInSeconds)
 	userLookup, err := cfg.db.LookupUser(r.Context(), chirpUser.Email)
 	if err != nil {
-		log.Fatalf("Could not lookup user %s: %s",chirpUser.Email, err)
+		log.Printf("Could not lookup user %s: %s",chirpUser.Email, err)
+		return 
 	}
 	if userLookup.Email != "" {
 		passCheck := auth.CheckPasswordHash(chirpUser.Password, userLookup.HashedPassword)
@@ -294,14 +301,14 @@ func (cfg *apiConfig) chirpLogin(w http.ResponseWriter, r *http.Request){
 		 
 	}
 	refreshTokenParams := database.InsertRefreshTokenParams{UserID: userLookup.ID, Token: chirpUserRefreshtoken}
-	rt, err := cfg.db.InsertRefreshToken(r.Context(), refreshTokenParams)
+	_, err = cfg.db.InsertRefreshToken(r.Context(), refreshTokenParams)
 	if err != nil {
 		log.Printf("Error inserting the refresh token %v: %s",refreshTokenParams, err )
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("Error with the server, please try again."))
 		return 
 	}
-	log.Printf("Refresh token %v inserted successfully\n", rt)
+	// log.Printf("Refresh token %v inserted successfully\n", rt)
 
 	finalUser := createDBUserResponse{ ID: userLookup.ID, CreatedAt: userLookup.CreatedAt, UpdatedAt: userLookup.UpdatedAt, Email: userLookup.Email, Token: chirpUserToken, RefreshToken: chirpUserRefreshtoken}
 	w.WriteHeader(http.StatusOK)
@@ -358,13 +365,7 @@ func (cfg *apiConfig) getRefreshToken(w http.ResponseWriter, r *http.Request){
 		w.Write([]byte("Invalid Token"))
 		return 
 	}
-	// if userFromToken.RevokedAt.Time.GoString() != "0001-01-01 00:00:00 +0000 UTC" {
-	// 	log.Printf("Token was revoked at %v", userFromToken.RevokedAt)
-	// 	w.WriteHeader(http.StatusUnauthorized)
-	// 	// w.Write([]byte("Invalid Token"))
-	// 	return 
 
-	// }
 	val, err := auth.MakeJWT(userFromToken.UserID, cfg.secret, time.Hour)
 	if err != nil {
 		log.Printf("Error generating JWT: %s", err)
@@ -418,6 +419,114 @@ func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request)
 	}
 	w.WriteHeader(http.StatusNoContent)
 	
+
+}
+
+func (cfg *apiConfig) updateUsers(w http.ResponseWriter, r *http.Request){
+	tokenHeader, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("There was an error getting the header token")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Server Error, please try again."))
+		return 
+	}
+	_,err = auth.ValidateJWT(tokenHeader, cfg.secret) 
+	if err != nil {
+		log.Printf("Invalid token: %s", tokenHeader)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Invalid User"))
+		return 
+	}
+	updateChirpUser := chirpUser{}
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&updateChirpUser)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("There was an error logging in."))
+		log.Fatalf("Error decoding the request %v: %s",r.Body,err)
+	}
+	password, err := auth.HashPassword(updateChirpUser.Password)
+	if err != nil {
+		log.Printf("Error hashing password %s: %s", updateChirpUser.Password, err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Server error, please try again."))
+		return 
+	}
+	params := database.UpdatePasswordParams{Email: updateChirpUser.Email, HashedPassword: password}
+	err = cfg.db.UpdatePassword(r.Context(), params)
+	if err != nil {
+		log.Printf("There was an error updating user %s, erorr: %s", updateChirpUser.Email, err)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Error updating the user"))
+		return 
+	}
+	finalUser := chirpUser{Email: updateChirpUser.Email}
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type","application/json")
+	dst, err := json.Marshal(finalUser)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("There was an error marshalling the final request"))
+		log.Printf("Error marshalling %v: %s", dst, err)
+		return 
+	}
+	w.Write([]byte(dst))
+
+
+
+}
+
+func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request){
+	tokenHeader, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting token")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Server Error, please try again"))
+		return 
+	}
+	userID, err := auth.ValidateJWT(tokenHeader, cfg.secret)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Error validating user"))
+		return 
+	}
+	
+	chirpID,_ := uuid.Parse(r.PathValue("chirpID"))
+	
+	results, err := cfg.db.GetOneChirp(r.Context(), chirpID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("Error finding chirp"))
+		log.Printf("There was an error getting chirps: %s",err)
+		return 
+	}
+	if userID == results.UserID {
+	// log.Printf("The results from the lookup: %v", results)
+	//log.Printf("This is in the header: %v", r.Header)	
+		err = cfg.db.DeleteChirp(r.Context(), results.ID)
+		if err != nil {
+			log.Printf("There was an error deleting %v: %s", results.ID, err)
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("Error Deleting the chirp"))
+			return 
+		}
+		
+		w.WriteHeader(http.StatusNoContent)
+		return 
+	} else {
+		log.Printf("User %s not authorized to delete %s", userID, results.Body)
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte("Not authorized to delete chirp."))
+		return 
+	}
+	
+	// chirp := chirpSuccess{
+	// 		ID: results.ID,
+	// 		CreatedAt: results.CreatedAt,
+	// 		UpdatedAt: results.UpdatedAt,
+	// 		Body: results.Body,
+	// 		UserID: results.UserID,
+	// }
 
 }
 
@@ -485,6 +594,9 @@ mux.HandleFunc("POST /api/users", apiConfig.createUsers)
 mux.HandleFunc("POST /api/login", apiConfig.chirpLogin)
 mux.HandleFunc("POST /api/refresh", apiConfig.getRefreshToken)
 mux.HandleFunc("POST /api/revoke", apiConfig.revokeRefreshToken)
+
+mux.HandleFunc("PUT /api/users", apiConfig.updateUsers)
+mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiConfig.deleteChirp)
 
 
 log.Printf("Server files from %s on port: %d",rootDir, httpPort)
