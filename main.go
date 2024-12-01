@@ -114,6 +114,7 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request){
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte("User must be logged in"))
+		return
 	}
 	tokenUserID,err := auth.ValidateJWT(headerToken, cfg.secret)
 	if err != nil {
@@ -255,9 +256,9 @@ func (cfg *apiConfig) chirpLogin(w http.ResponseWriter, r *http.Request){
 		w.Write([]byte("There was an error logging in."))
 		log.Fatalf("Error decoding the request %v: %s",r.Body,err)
 	}
-	if chirpUser.ExpiresInSeconds == 0 || chirpUser.ExpiresInSeconds > 3600 {
-			chirpUser.ExpiresInSeconds = int(time.Second) * 3600
-	}
+	
+	chirpUser.ExpiresInSeconds = int(time.Second) * 3600
+	
 	// log.Println("The user expiration duration is set to ", chirpUser.ExpiresInSeconds)
 	userLookup, err := cfg.db.LookupUser(r.Context(), chirpUser.Email)
 	if err != nil {
@@ -276,11 +277,33 @@ func (cfg *apiConfig) chirpLogin(w http.ResponseWriter, r *http.Request){
 		return 	
 	}
 	chirpUserToken, err := auth.MakeJWT(userLookup.ID, cfg.secret, time.Duration(chirpUser.ExpiresInSeconds))
+	
 	// log.Println("the token that was created is: ",chirpUserToken)
 	if err != nil {
-		log.Fatalf("Error getting jwt: %s", err)
+		log.Printf("Error getting jwt: %s\n", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Server Error, Please try again"))
+		return 
 	}
-	finalUser := createDBUserResponse{ ID: userLookup.ID, CreatedAt: userLookup.CreatedAt, UpdatedAt: userLookup.UpdatedAt, Email: userLookup.Email, Token: chirpUserToken}
+	chirpUserRefreshtoken, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("There was an error creating refresh token: %s\n",err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Server Error, Please try again"))
+		return 
+		 
+	}
+	refreshTokenParams := database.InsertRefreshTokenParams{UserID: userLookup.ID, Token: chirpUserRefreshtoken}
+	rt, err := cfg.db.InsertRefreshToken(r.Context(), refreshTokenParams)
+	if err != nil {
+		log.Printf("Error inserting the refresh token %v: %s",refreshTokenParams, err )
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error with the server, please try again."))
+		return 
+	}
+	log.Printf("Refresh token %v inserted successfully\n", rt)
+
+	finalUser := createDBUserResponse{ ID: userLookup.ID, CreatedAt: userLookup.CreatedAt, UpdatedAt: userLookup.UpdatedAt, Email: userLookup.Email, Token: chirpUserToken, RefreshToken: chirpUserRefreshtoken}
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type","application/json")
 	dst, err := json.Marshal(finalUser)
@@ -288,9 +311,114 @@ func (cfg *apiConfig) chirpLogin(w http.ResponseWriter, r *http.Request){
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("There was an error marshalling the final request"))
 		log.Fatalf("Error marshalling %v: %s", dst, err)
+		return 
 	}
 	w.Write([]byte(dst))
 	
+}
+
+func (cfg *apiConfig) getRefreshToken(w http.ResponseWriter, r *http.Request){
+	headerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User must be logged in"))
+		return 
+	}
+	userFromToken, err := cfg.db.GetRefreshToken(r.Context(),headerToken)
+	if err != nil {
+		log.Printf("There was an error getting %s from the database: %s", headerToken, err)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Server Error, please try again."))
+		return 
+	}
+	var emptyRefeshStruct database.RefreshToken
+	log.Printf("The user found from the database has user id of: %v",userFromToken.UserID)
+	if emptyRefeshStruct == userFromToken  {
+		log.Printf("User not found in the db\n")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Unauthorized User"))
+		return
+
+	}
+	if userFromToken.ExpiresAt.Compare(time.Now().Add(time.Hour * 24 * 60)) == +1 {
+		log.Printf("Token has expired for user %v at %v", userFromToken.UserID, userFromToken.ExpiresAt)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Token has expired"))
+		return 
+
+	}
+	ok,err := userFromToken.RevokedAt.Value()
+	if err != nil {
+		log.Printf("This is the error from sql nulltime: %s",err)
+	}
+	// log.Printf("This is the ok from sql null time: %s",ok)
+	if ok != nil {
+		log.Printf("The token was revoked at: %v",userFromToken.RevokedAt)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Invalid Token"))
+		return 
+	}
+	// if userFromToken.RevokedAt.Time.GoString() != "0001-01-01 00:00:00 +0000 UTC" {
+	// 	log.Printf("Token was revoked at %v", userFromToken.RevokedAt)
+	// 	w.WriteHeader(http.StatusUnauthorized)
+	// 	// w.Write([]byte("Invalid Token"))
+	// 	return 
+
+	// }
+	val, err := auth.MakeJWT(userFromToken.UserID, cfg.secret, time.Hour)
+	if err != nil {
+		log.Printf("Error generating JWT: %s", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Server Error, Please try again"))
+		return 
+	}
+	newjwt := NewJWT{Token: val}
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type","application/json")
+	dst, err := json.Marshal(newjwt)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("There was an error marshalling the final request"))
+		log.Printf("Error marshalling %v: %s", dst, err)
+		return 
+	}
+	w.Write([]byte(dst))
+
+	
+}
+
+func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request) {
+	tokenHeader, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting token\n")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("There was a server error, please try again."))
+		return		
+	}
+	userFromToken, err := cfg.db.GetRefreshToken(r.Context(),tokenHeader)
+	if err != nil {
+		log.Printf("Error getting user information from the database: %s",err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error getting user information, please try again."))
+		return 
+	}
+	var emptyRefeshStruct database.RefreshToken
+	if userFromToken == emptyRefeshStruct {
+		log.Printf("User not found in the database: %v", userFromToken)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Bad Request to revoke this user."))
+		return 
+	}
+	err = cfg.db.SetRevokedDate(r.Context(), userFromToken.Token)
+	if err != nil {
+		log.Printf("There was an error removing %s from the database", userFromToken.UserID)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Erorr revoking users refresh token."))
+		return 
+	}
+	w.WriteHeader(http.StatusNoContent)
+	
+
 }
 
 func cleanChirp(chirp string) string {
@@ -355,6 +483,8 @@ mux.HandleFunc("GET /api/chirps/{chirpID}", apiConfig.getOneChirp)
 mux.HandleFunc("POST /api/chirps", apiConfig.createChirp)
 mux.HandleFunc("POST /api/users", apiConfig.createUsers)
 mux.HandleFunc("POST /api/login", apiConfig.chirpLogin)
+mux.HandleFunc("POST /api/refresh", apiConfig.getRefreshToken)
+mux.HandleFunc("POST /api/revoke", apiConfig.revokeRefreshToken)
 
 
 log.Printf("Server files from %s on port: %d",rootDir, httpPort)
