@@ -79,6 +79,7 @@ func (cfg *apiConfig) createUsers(w http.ResponseWriter, r *http.Request){
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
+		IsChirpyRd: user.IsChirpyRed,
 	}
 	dst, err := json.Marshal(dbuser)
 	if err != nil {
@@ -194,12 +195,48 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request){
 }
 
 func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request){
+	
+	authorid := r.URL.Query().Get("author_id")
+	ascOrdesc := r.URL.Query().Get("sort")
+	
+
 	var allChirps []chirpSuccess
-	results, err := cfg.db.GetAllChirps(r.Context())
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Error getting chirps"))
-		log.Fatalf("There was an error getting chirps: %s",err)
+	var results  []database.Chirp
+	var err error
+	if authorid != ""{
+		// log.Printf("Found aurhorid: %s", authorid)
+		authParsed,err := uuid.Parse(authorid)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Error getting chirps"))
+			log.Printf("Could not parse %s: %s", authorid, err)
+			return 
+		}
+		if ascOrdesc != "desc"{
+			results, err = cfg.db.GetChirpsByAuthor(r.Context(),authParsed)
+		} else {
+			results, err = cfg.db.GetChirpsByAuthorDesc(r.Context(),authParsed)
+		}
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Error getting chirps"))
+			log.Printf("There was an error getting chirps: %s",err)
+			return
+		}
+		// log.Printf("results from authorid %s is %v",authorid, results)
+		
+	} else {
+		if ascOrdesc != "desc"{
+		results, err = cfg.db.GetAllChirps(r.Context())
+		} else {
+			results, err = cfg.db.GetAllChirpsDesc(r.Context())
+		}
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Error getting chirps"))
+			log.Printf("There was an error getting chirps: %s",err)
+			return
+		}
 	}
 	for _, val := range results{
 		newChirp := chirpSuccess{
@@ -310,7 +347,7 @@ func (cfg *apiConfig) chirpLogin(w http.ResponseWriter, r *http.Request){
 	}
 	// log.Printf("Refresh token %v inserted successfully\n", rt)
 
-	finalUser := createDBUserResponse{ ID: userLookup.ID, CreatedAt: userLookup.CreatedAt, UpdatedAt: userLookup.UpdatedAt, Email: userLookup.Email, Token: chirpUserToken, RefreshToken: chirpUserRefreshtoken}
+	finalUser := createDBUserResponse{ ID: userLookup.ID, CreatedAt: userLookup.CreatedAt, UpdatedAt: userLookup.UpdatedAt, Email: userLookup.Email, Token: chirpUserToken, RefreshToken: chirpUserRefreshtoken, IsChirpyRd: userLookup.IsChirpyRed}
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type","application/json")
 	dst, err := json.Marshal(finalUser)
@@ -559,6 +596,7 @@ func main(){
 godotenv.Load(".env")
 dbURL := os.Getenv("DB_URL")
 secretKey := os.Getenv("SECRET")
+polka_secret := os.Getenv("POLKA_KEY")
 
 
 db, err := sql.Open("postgres", dbURL)
@@ -570,7 +608,7 @@ dbQueries := database.New(db)
 rootDir := "."
 httpPort := 8080
 
-apiConfig := apiConfig{fileserverHits: atomic.Int32{}, db: dbQueries, secret: secretKey}
+apiConfig := apiConfig{fileserverHits: atomic.Int32{}, db: dbQueries, secret: secretKey, polka_key: polka_secret}
 
 mux := http.NewServeMux()
 
@@ -597,6 +635,7 @@ mux.HandleFunc("POST /api/revoke", apiConfig.revokeRefreshToken)
 
 mux.HandleFunc("PUT /api/users", apiConfig.updateUsers)
 mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiConfig.deleteChirp)
+mux.HandleFunc("POST /api/polka/webhooks", apiConfig.upgradeChirpyUser)
 
 
 log.Printf("Server files from %s on port: %d",rootDir, httpPort)
